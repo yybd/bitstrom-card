@@ -7,16 +7,24 @@
  *   height: 640                             # optional, pixels
  *   title: Bitstrom                         # optional
  */
-const CARD_VERSION = '0.1.0';
+const CARD_VERSION = '0.2.0';
 const DEFAULT_PORT = 17770;
+const DEFAULT_HEIGHT = 640;
 
 function defaultUrl() {
   return `http://${window.location.hostname}:${DEFAULT_PORT}`;
 }
 
+// A height that is not a positive number (an empty or mistyped field) falls
+// back to the default, everywhere the card uses it.
+function cardHeight(config) {
+  const h = Number(config?.height);
+  return Number.isFinite(h) && h > 0 ? h : DEFAULT_HEIGHT;
+}
+
 class BitstromCard extends HTMLElement {
   setConfig(config) {
-    this._config = { height: 640, ...config };
+    this._config = { ...config };
     this._render();
   }
 
@@ -25,7 +33,14 @@ class BitstromCard extends HTMLElement {
   }
 
   getCardSize() {
-    return Math.max(3, Math.round(Number(this._config?.height ?? 640) / 50));
+    return Math.max(3, Math.round(cardHeight(this._config) / 50));
+  }
+
+  // Sections dashboards: the full width, and as many rows (56px + 8px gap)
+  // as the frame and its title take.
+  getGridOptions() {
+    const rows = Math.ceil((cardHeight(this._config) + (this._config?.title ? 56 : 0)) / 64);
+    return { columns: 'full', rows, min_rows: 4 };
   }
 
   static getConfigElement() {
@@ -33,17 +48,19 @@ class BitstromCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { url: defaultUrl(), height: 640 };
+    return { url: defaultUrl(), height: DEFAULT_HEIGHT };
   }
 
   _render() {
     if (!this._config) return;
     const url = (this._config.url || defaultUrl()).replace(/\/+$/, '');
-    const height = Number(this._config.height) || 640;
+    const height = cardHeight(this._config);
     const title = this._config.title;
+    // Only a web address is shown in the frame.
+    const valid = /^https?:\/\//i.test(url);
     // An https dashboard cannot show an http page inside it (the browser
     // blocks mixed content): say so instead of an empty frame.
-    const blocked = window.location.protocol === 'https:' && url.startsWith('http:');
+    const blocked = valid && window.location.protocol === 'https:' && /^http:/i.test(url);
     this.innerHTML = `
       <ha-card ${title ? `header="${escapeHtml(title)}"` : ''}>
         <style>
@@ -52,7 +69,10 @@ class BitstromCard extends HTMLElement {
           .bitstrom-note a { color: var(--primary-color); }
         </style>
         ${
-          blocked
+          !valid
+            ? `<div class="bitstrom-note">The Bitstrom address must start with <code>http://</code> or
+               <code>https://</code> — for example <code>${escapeHtml(defaultUrl())}</code>.</div>`
+            : blocked
             ? `<div class="bitstrom-note">This dashboard is open over <b>https</b>, and the browser does not show the
                Bitstrom app (<code>${escapeHtml(url)}</code>, plain http) inside it.
                <a href="${escapeHtml(url)}" target="_blank" rel="noopener">Open Bitstrom in a new tab</a>,
@@ -67,12 +87,26 @@ class BitstromCard extends HTMLElement {
 class BitstromCardEditor extends HTMLElement {
   setConfig(config) {
     this._config = { ...config };
-    this._render();
+    if (this._rendered) this._sync();
+    else this._render();
   }
 
   set hass(_hass) {}
 
+  // Home Assistant hands every change back through setConfig: refresh the
+  // fields the user is not typing in, instead of rebuilding them (a rebuild
+  // drops the focus on every edit).
+  _sync() {
+    const c = this._config;
+    this.querySelectorAll('input').forEach((input) => {
+      if (input === document.activeElement) return;
+      const v = c[input.name];
+      input.value = v === undefined ? '' : String(v);
+    });
+  }
+
   _render() {
+    this._rendered = true;
     const c = this._config || {};
     this.innerHTML = `
       <style>
@@ -87,7 +121,7 @@ class BitstromCardEditor extends HTMLElement {
           <small>The add-on, or any Bitstrom server. Empty: this host, port ${DEFAULT_PORT}.</small>
         </label>
         <label>Height (pixels)
-          <input name="height" type="number" min="200" step="20" value="${escapeHtml(String(c.height ?? 640))}">
+          <input name="height" type="number" min="200" step="20" placeholder="${DEFAULT_HEIGHT}" value="${escapeHtml(c.height === undefined ? '' : String(c.height))}">
         </label>
         <label>Title (optional)
           <input name="title" type="text" value="${escapeHtml(c.title ?? '')}">
@@ -98,7 +132,7 @@ class BitstromCardEditor extends HTMLElement {
         const { name, value } = e.target;
         const next = { ...this._config };
         if (value === '') delete next[name];
-        else next[name] = name === 'height' ? Number(value) : value;
+        else next[name] = name === 'height' ? Number(value) : value.trim();
         this._config = next;
         this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: next }, bubbles: true, composed: true }));
       }),
